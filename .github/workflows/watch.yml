@@ -1,0 +1,46 @@
+# Vagos Metal Fest ticket watcher — polls OLX every 15 minutes and
+# Telegram-notifies on new listings. State (seen.json) is committed
+# back to the repo so each run knows what the previous ones saw.
+#
+# GitHub Actions scheduled crons can lag 5-15 min at busy times; for
+# ticket alerts that's acceptable. The workflow_dispatch trigger lets
+# you force a check from the Actions tab.
+
+name: watch-olx
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to commit seen.json back
+
+concurrency:
+  group: watch-olx
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run watcher
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 watcher.py
+
+      - name: Commit updated state
+        run: |
+          if git diff --quiet seen.json 2>/dev/null; then
+            echo "no state change"
+            exit 0
+          fi
+          git config user.name "vagos-watch-bot"
+          git config user.email "actions@github.com"
+          git add seen.json
+          git commit -m "state: update seen ads [skip ci]"
+          git push
