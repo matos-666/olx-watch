@@ -1,10 +1,13 @@
-# Vagos Metal Fest ticket watcher — polls OLX every 15 minutes and
-# Telegram-notifies on new listings. State (seen.json) is committed
-# back to the repo so each run knows what the previous ones saw.
+# OLX watcher — polls the configured searches and Telegram-notifies on
+# new listings. State (seen.json) is committed back to the repo so each
+# run knows what the previous ones saw.
 #
-# GitHub Actions scheduled crons can lag 5-15 min at busy times; for
-# ticket alerts that's acceptable. The workflow_dispatch trigger lets
-# you force a check from the Actions tab.
+# Target lives in the WATCH dict at the top of watcher.py.
+# Currently: Ray-Ban Hexagonal RB3548N sunglasses.
+#
+# GitHub's scheduled crons lag badly on the free tier — observed 80-98
+# min between fires on a */15 schedule. Fine for a classifieds watch;
+# use workflow_dispatch from the Actions tab when you want it now.
 
 name: watch-olx
 
@@ -35,12 +38,13 @@ jobs:
 
       - name: Commit updated state
         run: |
-          if git diff --quiet seen.json 2>/dev/null; then
+          if git diff --quiet seen.json 2>/dev/null && [ -f seen.json ]; then
             echo "no state change"
             exit 0
           fi
-          git config user.name "vagos-watch-bot"
+          git config user.name "olx-watch-bot"
           git config user.email "actions@github.com"
           git add seen.json
+          git diff --cached --quiet && { echo "nothing staged"; exit 0; }
           git commit -m "state: update seen ads [skip ci]"
           git push
