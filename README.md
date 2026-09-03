@@ -31,3 +31,44 @@ per existing listing), commit.
 
 Repo secrets: `TELEGRAM_BOT_TOKEN` (from @BotFather) and
 `TELEGRAM_CHAT_ID`.
+
+## Where this runs (and why not in the cloud)
+
+OLX blocks datacenter IPs. Every GitHub Actions run 403s — on the JSON
+API *and* the HTML scrape, for every query — so the scheduled workflow
+is disabled and the watcher runs **locally on the Mac** instead, where a
+residential IP plus a real browser gets through.
+
+`watcher.py` tries three tiers per run and stops at the first that works:
+
+1. **JSON API** over plain HTTP — cheapest, used when OLX isn't throttling
+2. **HTML scrape** of `__PRERENDERED_STATE__` — different protection path
+3. **Playwright browser** — warms up on the homepage for cookies, then
+   calls the API from page context. The only tier that survives a
+   throttled IP.
+
+### Local scheduling
+
+A launchd agent runs it every 15 minutes:
+
+```
+~/Library/LaunchAgents/pt.previews.olxwatch.plist
+```
+
+```bash
+launchctl unload ~/Library/LaunchAgents/pt.previews.olxwatch.plist   # stop
+launchctl load   ~/Library/LaunchAgents/pt.previews.olxwatch.plist   # start
+tail -f ~/olx-watch/watcher.log                                      # watch
+```
+
+The repo lives at `~/olx-watch` rather than under `~/Desktop` because
+macOS TCC blocks launchd agents from reading Desktop/Documents/Downloads
+without Full Disk Access.
+
+Telegram credentials live in `.telegram_token` and `.telegram_chat`
+(gitignored, chmod 600) rather than in the repo.
+
+**Caveat:** this only runs while the Mac is awake. Asleep or off means no
+checks. For an always-on safety net, OLX's own **"Guardar Pesquisa"**
+button on the search page sends native alerts and needs no
+infrastructure.

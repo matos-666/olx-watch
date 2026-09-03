@@ -11,9 +11,12 @@
 
 name: watch-olx
 
+# SCHEDULE DISABLED. OLX now 403s datacenter IPs outright — every
+# Actions run failed on both the JSON API and the HTML scrape, for
+# every query. The watcher runs locally instead, on a residential
+# connection, via launchd (see README). Manual dispatch is kept so the
+# cloud path can be retested if OLX ever relaxes.
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:

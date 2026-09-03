@@ -48,12 +48,13 @@ WATCH = {
     "model": re.compile(r"3548", re.I),
     "shape": re.compile(r"hexagon", re.I),
     # Other Ray-Ban model numbers that ride along in the results
-    # (RB4548NM is the Ferrari hexagonal — a different, pricier model;
-    # RB3016 Clubmaster / RB3386 / etc. aren't hexagonal at all).
+    # (RB4548NM is the Ferrari hexagonal and RB3579N the Blaze hexagonal —
+    # both hexagonal but NOT the RB3548N; RB3016 Clubmaster / RB3386 / etc.
+    # aren't hexagonal at all).
     # Digit-boundary lookarounds, NOT \b: model codes are glued to letter
     # suffixes ("RB4548NM"), and \b never matches between a digit and a
     # letter — so a trailing \b silently let the Ferrari RB4548NM through.
-    "other_models": re.compile(r"(?<!\d)(?:4548|3016|3386|3025|2140|3447|4165)(?!\d)", re.I),
+    "other_models": re.compile(r"(?<!\d)(?:4548|3579|3016|3386|3025|2140|3447|4165)(?!\d)", re.I),
     # Replacement lenses, not the actual sunglasses. Still reported, but
     # tagged so a glance tells them apart.
     "parts_only": re.compile(r"\blentes?\b|\blenses\b|\bhaste|\barmaç", re.I),
@@ -201,9 +202,65 @@ def fetch_via_html(query: str) -> list[dict]:
     return out
 
 
+def fetch_via_browser(queries: list[str]) -> dict[int, dict]:
+    """Last resort: drive a real browser on this machine.
+
+    OLX blocks datacenter IPs outright (GitHub Actions gets 403 on both
+    the API and the HTML) and also 403s plain HTTP from residential IPs.
+    A real browser on a residential connection still passes, so this tier
+    exists for running the watcher locally.
+
+    One browser handles every query: launching Chromium costs ~2s, and we
+    warm up on the homepage once so the session picks up whatever cookies
+    the bot check hands out before touching the API.
+    """
+    from playwright.sync_api import sync_playwright  # imported lazily
+
+    out: dict[int, dict] = {}
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=True, args=["--disable-blink-features=AutomationControlled"]
+        )
+        ctx = browser.new_context(locale="pt-PT", user_agent=UA)
+        ctx.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+        )
+        page = ctx.new_page()
+        page.goto("https://www.olx.pt/", wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(2500)
+
+        for query in queries:
+            qs = urllib.parse.urlencode({"offset": 0, "limit": 40, "query": query})
+            payload = page.evaluate(
+                """async (u) => {
+                    const r = await fetch(u, {credentials:'include',
+                                              headers:{'Accept':'application/json'}});
+                    if (!r.ok) return {error: r.status};
+                    return await r.json();
+                }""",
+                f"{API_URL}?{qs}",
+            )
+            if not isinstance(payload, dict) or payload.get("error"):
+                print(f"WARN: browser '{query}': HTTP {(payload or {}).get('error')}")
+                continue
+            hits = 0
+            for offer in payload.get("data") or []:
+                norm = _normalise(offer)
+                if norm:
+                    out[norm["id"]] = norm
+                    hits += 1
+            print(f"browser '{query}': {hits} relevant")
+
+        browser.close()
+    return out
+
+
 def fetch_ads() -> list[dict]:
-    """Run every query through the API, falling back to HTML per query.
-    Results are merged and deduped by ad id."""
+    """Try plain HTTP first (API, then HTML) per query; if every query
+    comes up empty, fall back to one shared browser session.
+
+    Results are merged and deduped by ad id across all tiers.
+    """
     by_id: dict[int, dict] = {}
     errors = []
 
@@ -222,11 +279,29 @@ def fetch_ads() -> list[dict]:
         for ad in got or []:
             by_id[ad["id"]] = ad
 
-    # Only a total wipeout is fatal — one dead query shouldn't kill the run.
-    if errors and not by_id:
+    if not by_id:
+        # Every plain-HTTP path failed. This is the normal state from a
+        # datacenter IP, so it's expected rather than exceptional.
+        for e in errors:
+            print(f"WARN: {e}")
+        print("plain HTTP got nothing — trying local browser")
+        try:
+            by_id.update(fetch_via_browser(WATCH["queries"]))
+        except ImportError:
+            raise RuntimeError(
+                "all plain-HTTP searches failed and Playwright isn't installed. "
+                "OLX blocks datacenter IPs, so this watcher needs to run on a "
+                "residential connection with `pip install playwright && "
+                "playwright install chromium`."
+            ) from None
+        except Exception as browser_err:  # noqa: BLE001
+            raise RuntimeError(
+                f"all searches failed. plain HTTP: {' | '.join(errors)} ; "
+                f"browser: {browser_err}"
+            ) from None
+
+    if not by_id:
         raise RuntimeError("all searches failed: " + " | ".join(errors))
-    for e in errors:
-        print(f"WARN: {e}")
 
     return sorted(by_id.values(), key=lambda a: (a["price_value"] or 9e9))
 
