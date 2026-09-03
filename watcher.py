@@ -36,13 +36,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------
 WATCH = {
     "name": "Ray-Ban Hexagonal RB3548N",
-    # Several searches, merged and deduped by ad id. OLX caps each search
-    # at ~40 results and pads the tail with loosely-related items, so two
-    # narrow searches beat one broad one for coverage.
-    "searches": [
-        "https://www.olx.pt/moda/malas-e-acessorios/oculos-sol/q-ray-ban-hexagonal/",
-        "https://www.olx.pt/moda/malas-e-acessorios/oculos-sol/q-rb3548/",
-    ],
+    # Several queries, merged and deduped by ad id. OLX caps each search
+    # around 40 results and pads the tail with loosely-related items, so
+    # two narrow queries beat one broad one for coverage.
+    "queries": ["ray ban hexagonal", "rb3548"],
+    # Category path, used only by the HTML fallback below.
+    "category_path": "moda/malas-e-acessorios/oculos-sol",
     # A title must look like Ray-Ban…
     "brand": re.compile(r"ray[\s\-]?ban", re.I),
     # …and name either the exact model or the shape.
@@ -95,65 +94,135 @@ def classify(title: str) -> str | None:
     return kind
 
 
+API_URL = "https://www.olx.pt/api/v1/offers/"
+
+
+def _normalise(offer: dict) -> dict | None:
+    """Turn one OLX API offer into our internal shape, or None if irrelevant."""
+    title = (offer.get("title") or "").strip()
+    kind = classify(title)
+    if kind is None:
+        return None
+    price_label, price_value = "?", None
+    for prm in offer.get("params") or []:
+        if prm.get("key") == "price":
+            val = prm.get("value") or {}
+            price_label = val.get("label") or prm.get("label") or "?"
+            price_value = val.get("value")
+            break
+    loc = offer.get("location") or {}
+    return {
+        "id": offer["id"],
+        "title": title,
+        "kind": kind,
+        "price": price_label,
+        "price_value": price_value,
+        "url": offer.get("url", ""),
+        "city": (loc.get("city") or {}).get("name") or "",
+        "region": (loc.get("region") or {}).get("name") or "",
+    }
+
+
+def _get(url: str) -> str:
+    """GET with browser-ish headers. OLX 403s bare requests."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": UA,
+            "Accept": "application/json, text/html;q=0.9,*/*;q=0.8",
+            "Accept-Language": "pt-PT,pt;q=0.9,en;q=0.8",
+            "Referer": "https://www.olx.pt/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def fetch_via_api(query: str) -> list[dict]:
+    """Primary path: OLX's own JSON API. Cleaner than scraping and gives
+    a numeric price instead of a display string we'd have to parse."""
+    qs = urllib.parse.urlencode({"offset": 0, "limit": 40, "query": query})
+    payload = json.loads(_get(f"{API_URL}?{qs}"))
+    out = []
+    for offer in payload.get("data") or []:
+        norm = _normalise(offer)
+        if norm:
+            out.append(norm)
+    return out
+
+
+def fetch_via_html(query: str) -> list[dict]:
+    """Fallback: scrape __PRERENDERED_STATE__ out of the search page.
+
+    Kept because the API and the HTML sit behind different protection —
+    when one starts 403ing the other has historically still worked.
+    """
+    slug = "q-" + query.replace(" ", "-")
+    url = f"https://www.olx.pt/{WATCH['category_path']}/{slug}/"
+    html = _get(url)
+    m = re.search(r'window\.__PRERENDERED_STATE__\s*=\s*"(.*?)";\s*\n', html, re.S)
+    if not m:
+        raise RuntimeError("__PRERENDERED_STATE__ not found")
+    state = json.loads(json.loads('"' + m.group(1) + '"'))
+
+    def find_ads(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if (
+                    k == "ads"
+                    and isinstance(v, list)
+                    and v
+                    and isinstance(v[0], dict)
+                    and "title" in v[0]
+                ):
+                    return v
+                found = find_ads(v)
+                if found is not None:
+                    return found
+        return None
+
+    out = []
+    for a in find_ads(state) or []:
+        title = (a.get("title") or "").strip()
+        kind = classify(title)
+        if kind is None:
+            continue
+        price = a.get("price") or {}
+        out.append({
+            "id": a["id"],
+            "title": title,
+            "kind": kind,
+            "price": price.get("displayValue") or "?",
+            "price_value": (price.get("regularPrice") or {}).get("value"),
+            "url": a.get("url", ""),
+            "city": (a.get("location") or {}).get("cityName") or "",
+            "region": (a.get("location") or {}).get("regionName") or "",
+        })
+    return out
+
+
 def fetch_ads() -> list[dict]:
-    """Fetch every configured search, merge, dedupe by id, keep relevant."""
+    """Run every query through the API, falling back to HTML per query.
+    Results are merged and deduped by ad id."""
     by_id: dict[int, dict] = {}
     errors = []
 
-    for url in WATCH["searches"]:
+    for query in WATCH["queries"]:
+        got = None
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                html = resp.read().decode("utf-8", errors="replace")
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{url}: {e}")
-            continue
+            got = fetch_via_api(query)
+            print(f"api   '{query}': {len(got)} relevant")
+        except Exception as api_err:  # noqa: BLE001
+            errors.append(f"api '{query}': {api_err}")
+            try:
+                got = fetch_via_html(query)
+                print(f"html  '{query}': {len(got)} relevant (API failed over)")
+            except Exception as html_err:  # noqa: BLE001
+                errors.append(f"html '{query}': {html_err}")
+        for ad in got or []:
+            by_id[ad["id"]] = ad
 
-        m = re.search(r'window\.__PRERENDERED_STATE__\s*=\s*"(.*?)";\s*\n', html, re.S)
-        if not m:
-            errors.append(f"{url}: __PRERENDERED_STATE__ not found")
-            continue
-
-        try:
-            state = json.loads(json.loads('"' + m.group(1) + '"'))
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{url}: state parse failed: {e}")
-            continue
-
-        def find_ads(obj):
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    if (
-                        k == "ads"
-                        and isinstance(v, list)
-                        and v
-                        and isinstance(v[0], dict)
-                        and "title" in v[0]
-                    ):
-                        return v
-                    found = find_ads(v)
-                    if found is not None:
-                        return found
-            return None
-
-        for a in find_ads(state) or []:
-            title = (a.get("title") or "").strip()
-            kind = classify(title)
-            if kind is None:
-                continue
-            price_obj = (a.get("price") or {}).get("regularPrice") or {}
-            by_id[a["id"]] = {
-                "id": a["id"],
-                "title": title,
-                "kind": kind,
-                "price": (a.get("price") or {}).get("displayValue") or "?",
-                "price_value": price_obj.get("value"),
-                "url": a.get("url", ""),
-                "city": (a.get("location") or {}).get("cityName") or "",
-                "region": (a.get("location") or {}).get("regionName") or "",
-            }
-
-    # Only a total wipeout is fatal — one dead search shouldn't kill the run.
+    # Only a total wipeout is fatal — one dead query shouldn't kill the run.
     if errors and not by_id:
         raise RuntimeError("all searches failed: " + " | ".join(errors))
     for e in errors:
