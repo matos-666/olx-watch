@@ -1,5 +1,5 @@
 __pycache__/
 *.pyc
-.telegram_token
-.telegram_chat
+.env
 watcher.log
+seen.json

@@ -1,0 +1,4 @@
+# The watcher itself is stdlib-only. Playwright is the last-resort fetch
+# tier, needed only when OLX throttles plain HTTP from this IP.
+#   pip install -r requirements.txt && playwright install chromium
+playwright>=1.40

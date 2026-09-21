@@ -2,8 +2,7 @@
 # new listings. State (seen.json) is committed back to the repo so each
 # run knows what the previous ones saw.
 #
-# Target lives in the WATCH dict at the top of watcher.py.
-# Currently: Ray-Ban Hexagonal RB3548N sunglasses.
+# Target lives in hunt.py.
 #
 # GitHub's scheduled crons lag badly on the free tier — observed 80-98
 # min between fires on a */15 schedule. Fine for a classifieds watch;

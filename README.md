@@ -1,59 +1,72 @@
 # olx-watch
 
-Polls OLX.pt every ~15 min (GitHub Actions cron), diffs against
-`seen.json`, and Telegram-notifies any new listing that matches.
+Polls OLX.pt every 15 minutes and sends a Telegram message for every new
+listing that matches.
 
-**Currently hunting:** Ray-Ban Hexagonal **RB3548N** sunglasses.
+**Currently hunting:** guitar cabinets, **4x12** (in Lazer › Instrumentos
+Musicais).
 
-Alerts are tagged by confidence and price:
-
-| Tag | Meaning |
+| Alert | Meaning |
 |---|---|
-| 🕶️🔥 **RB3548N — BOM PREÇO** | Model number in the title, at or under the good-price threshold |
-| 🕶️ **RB3548N** | Model number in the title |
-| 🕶️🔥 Ray-Ban Hexagonal — BOM PREÇO | Ray-Ban + hexagonal, no model number, good price |
-| 🕶️ Ray-Ban Hexagonal | Ray-Ban + hexagonal, no model number |
-| 🔧 Só peças/lentes | Matched, but it's replacement lenses/frames rather than whole glasses |
+| 🔊 **Coluna 4x12** | a standalone cab |
+| 🎛️ **Cabeça + coluna 4x12** | head and cab sold together |
+| 🔧 Acessório p/ 4x12 | cover, wheels, speakers *for* a 4x12 |
+| · 🔥 BOM PREÇO | at or under the threshold (cab ≤ 200 €, stack ≤ 400 €) |
+| · 🔁 reativado | an old ad the seller just bumped back to the top |
 
-Look-alikes that share the search results are filtered out — notably the
-**RB4548NM** Scuderia Ferrari hexagonal (different, pricier model) and
-non-hexagonal Ray-Bans (Clubmaster RB3016, RB3386, …).
+Each alert also shows brand(s), price, location, publish date and link.
 
-## Retargeting
+The filter recognises every way sellers write it (`4x12`, `4 x 12`,
+`4X12`, `4×12`), model codes that never say "4x12" (Orange PPC412, Marshall
+AVT412 / 8412 / 1960, Blackstar HTV-412A), and bare "412" next to a cab
+word. It drops 2x12/1x12 cabs, "Compro"/"Procuro" posts (buyers), rentals,
+and guitars whose model number contains 412 (Harley Benton CLJ-412E).
+`test_hunt.py` holds the cases — every past mistake is one of them.
 
-Everything about the hunt lives in the `WATCH` dict at the top of
-`watcher.py` — searches, brand/model/shape regexes, exclusions, price
-threshold. To point it at something else: edit that dict, delete
-`seen.json` (so the new target seeds cleanly instead of firing an alert
-per existing listing), commit.
+```bash
+python3 -m unittest            # run the classifier suite
+```
 
-## Setup
+## Layout
 
-Repo secrets: `TELEGRAM_BOT_TOKEN` (from @BotFather) and
-`TELEGRAM_CHAT_ID`.
+| File | Role |
+|---|---|
+| `hunt.py` | **what** to hunt: queries, category, classifier, alert tags, price thresholds |
+| `watcher.py` | the engine: fetch, dedupe, alert. Target-agnostic |
+| `test_hunt.py` | regression suite for the classifier and the alert format |
+| `seen.json` | ids already reported. Local state, gitignored |
+
+### Retargeting
+
+Replace `hunt.py` (its docstring lists what it must export), update
+`test_hunt.py`, **delete `seen.json`**, then run once by hand. Deleting
+the state makes the first run seed the current listings silently.
+Without that, every existing listing would alert as new.
+
+## Why newest-first matters
+
+OLX returns about 40 results per query and ranks by relevance unless told
+otherwise. With 146+ matches, a fresh listing can land at position 90 and
+never be seen. Every query is sent with `sort_by=created_at:desc`, which
+on OLX means *most recently refreshed*. New listings are always on top.
 
 ## Where this runs (and why not in the cloud)
 
-OLX blocks datacenter IPs. Every GitHub Actions run 403s — on the JSON
-API *and* the HTML scrape, for every query — so the scheduled workflow
-is disabled and the watcher runs **locally on the Mac** instead, where a
-residential IP plus a real browser gets through.
+OLX blocks datacenter IPs: GitHub Actions gets 403 on the API *and* the
+HTML. The scheduled workflow is disabled (manual dispatch kept for
+retesting), and the watcher runs **locally on the Mac** via launchd.
 
-`watcher.py` tries three tiers per run and stops at the first that works:
+`watcher.py` degrades through three fetch tiers, stopping at the first
+that answers:
 
-1. **JSON API** over plain HTTP — cheapest, used when OLX isn't throttling
-2. **HTML scrape** of `__PRERENDERED_STATE__` — different protection path
-3. **Playwright browser** — warms up on the homepage for cookies, then
-   calls the API from page context. The only tier that survives a
-   throttled IP.
+1. **JSON API** over plain HTTP: about 25 MB, under 1 s
+2. **HTML scrape** of the server-rendered state
+3. **Playwright browser**: about 670 MB, about 5 s. The only tier that
+   survives a throttled IP. It launches only when OLX doesn't answer at
+   all, never merely because nothing matched.
 
-### Local scheduling
-
-A launchd agent runs it every 15 minutes:
-
-```
-~/Library/LaunchAgents/pt.previews.olxwatch.plist
-```
+A `while True` loop was considered and rejected. launchd restarts after
+crashes and reboots, and nothing stays resident between checks.
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/pt.previews.olxwatch.plist   # stop
@@ -61,14 +74,17 @@ launchctl load   ~/Library/LaunchAgents/pt.previews.olxwatch.plist   # start
 tail -f ~/olx-watch/watcher.log                                      # watch
 ```
 
-The repo lives at `~/olx-watch` rather than under `~/Desktop` because
-macOS TCC blocks launchd agents from reading Desktop/Documents/Downloads
-without Full Disk Access.
+The repo lives at `~/olx-watch` rather than under `~/Desktop`, because
+macOS TCC blocks launchd agents from reading Desktop, Documents and
+Downloads.
 
-Telegram credentials live in `.telegram_token` and `.telegram_chat`
-(gitignored, chmod 600) rather than in the repo.
+## Setup
 
-**Caveat:** this only runs while the Mac is awake. Asleep or off means no
-checks. For an always-on safety net, OLX's own **"Guardar Pesquisa"**
-button on the search page sends native alerts and needs no
-infrastructure.
+```bash
+pip install -r requirements.txt && playwright install chromium
+cp .env.example .env    # fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
+```
+
+**Caveat:** it only runs while the Mac is awake. For an always-on safety
+net, OLX's own **"Guardar Pesquisa"** button on the search page sends
+native alerts.
